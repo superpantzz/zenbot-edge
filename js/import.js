@@ -899,46 +899,68 @@ function mergeTradesUnique(existing, incoming) {
 // Import handler
 // ============================================================
 
-function handleImport(file) {
+function readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve({ text: reader.result, name: file.name });
+        reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+        reader.readAsText(file);
+    });
+}
+
+function parseCSVText(text, fileName) {
+    const firstLine = text.split(/\r?\n/)[0] || '';
+    if (text.indexOf('Futures Statements') !== -1) {
+        return parseSchwabAccountStatement(text);
+    } else if (text.indexOf('Account Trade History') !== -1) {
+        return parseSchwabCSV(text);
+    } else if (firstLine.indexOf('DateTime') !== -1 && firstLine.indexOf('EntryType') !== -1 && firstLine.indexOf('IsWin') !== -1) {
+        return parseZoneBotCSV(text, fileName);
+    } else {
+        return parseNinjaTraderCSV(text);
+    }
+}
+
+function handleImport(filesOrFile) {
     const statusEl = document.getElementById('import-status');
 
-    if (!file || !file.name.toLowerCase().endsWith('.csv')) {
+    // Normalize to array of CSV files
+    const files = [];
+    if (filesOrFile instanceof FileList || Array.isArray(filesOrFile)) {
+        for (let i = 0; i < filesOrFile.length; i++) {
+            if (filesOrFile[i].name.toLowerCase().endsWith('.csv')) files.push(filesOrFile[i]);
+        }
+    } else if (filesOrFile && filesOrFile.name && filesOrFile.name.toLowerCase().endsWith('.csv')) {
+        files.push(filesOrFile);
+    }
+
+    if (files.length === 0) {
         if (statusEl) {
-            statusEl.textContent = 'Please select a .csv file.';
+            statusEl.textContent = 'Please select one or more .csv files.';
             statusEl.className = 'import-status error';
         }
         return;
     }
 
     if (statusEl) {
-        statusEl.textContent = 'Reading file...';
+        statusEl.textContent = files.length === 1 ? 'Reading file...' : `Reading ${files.length} files...`;
         statusEl.className = 'import-status';
     }
 
-    const reader = new FileReader();
-    reader.onload = function (e) {
+    // Read all files, parse each, merge together
+    Promise.all(files.map(readFileAsText)).then(results => {
         try {
-            const text = e.target.result;
             if (statusEl) statusEl.textContent = 'Parsing trades...';
 
-            // Auto-detect format by content sniffing
-            // Check Futures Statements first — Account Statement files contain both
-            // sections, and the Futures Statements parser handles that format correctly.
-            let trades;
-            const firstLine = text.split(/\r?\n/)[0] || '';
-            if (text.indexOf('Futures Statements') !== -1) {
-                trades = parseSchwabAccountStatement(text);
-            } else if (text.indexOf('Account Trade History') !== -1) {
-                trades = parseSchwabCSV(text);
-            } else if (firstLine.indexOf('DateTime') !== -1 && firstLine.indexOf('EntryType') !== -1 && firstLine.indexOf('IsWin') !== -1) {
-                trades = parseZoneBotCSV(text, file.name);
-            } else {
-                trades = parseNinjaTraderCSV(text);
+            let allNewTrades = [];
+            for (const { text, name } of results) {
+                const trades = parseCSVText(text, name);
+                allNewTrades = allNewTrades.concat(trades);
             }
 
-            if (trades.length === 0) {
+            if (allNewTrades.length === 0) {
                 if (statusEl) {
-                    statusEl.textContent = 'No valid trades found. Make sure this is a NinjaTrader, thinkorswim, or ZoneBot trade export CSV.';
+                    statusEl.textContent = 'No valid trades found. Make sure files are NinjaTrader, thinkorswim, or ZoneBot trade export CSVs.';
                     statusEl.className = 'import-status error';
                 }
                 return;
@@ -947,14 +969,14 @@ function handleImport(file) {
             // Merge with existing trades if any are already loaded
             const existingTrades = (window.TRADE_DATA && window.TRADE_DATA.trades) ? window.TRADE_DATA.trades : [];
             const merged = existingTrades.length > 0
-                ? mergeTradesUnique(existingTrades, trades)
-                : trades;
+                ? mergeTradesUnique(existingTrades, allNewTrades)
+                : allNewTrades;
 
             const newCount = merged.length - existingTrades.length;
             if (existingTrades.length > 0) {
                 if (statusEl) statusEl.textContent = `Added ${newCount} new trades (${merged.length} total). Building dashboard...`;
             } else {
-                if (statusEl) statusEl.textContent = `Found ${trades.length} trades. Building dashboard...`;
+                if (statusEl) statusEl.textContent = `Found ${merged.length} trades from ${files.length} file${files.length > 1 ? 's' : ''}. Building dashboard...`;
             }
 
             const data = buildTradeData(merged);
@@ -976,14 +998,10 @@ function handleImport(file) {
                 statusEl.className = 'import-status error';
             }
         }
-    };
-
-    reader.onerror = function () {
+    }).catch(err => {
         if (statusEl) {
-            statusEl.textContent = 'Error reading file.';
+            statusEl.textContent = 'Error reading file: ' + err.message;
             statusEl.className = 'import-status error';
         }
-    };
-
-    reader.readAsText(file);
+    });
 }

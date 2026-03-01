@@ -334,8 +334,7 @@ function setupDropzone() {
     dropzone.addEventListener('drop', (e) => {
         e.preventDefault();
         dropzone.classList.remove('dragover');
-        const file = e.dataTransfer.files[0];
-        if (file) handleImport(file);
+        if (e.dataTransfer.files.length > 0) handleImport(e.dataTransfer.files);
     });
 }
 
@@ -889,8 +888,23 @@ function renderSidebar() {
 
     list.innerHTML = html;
 
+    // Auto-size sidebar to fit longest strategy name
+    autoSizeSidebar();
+
     // Update selection count badge
     updateSelectionBadge();
+}
+
+function autoSizeSidebar() {
+    const sidebar = document.querySelector('.sidebar');
+    if (!sidebar) return;
+    // Temporarily remove width constraint so we can measure natural content width
+    sidebar.style.width = 'max-content';
+    const natural = sidebar.offsetWidth;
+    sidebar.style.width = '';
+    const minWidth = 260;
+    const newWidth = Math.max(minWidth, natural);
+    document.documentElement.style.setProperty('--sidebar-width', newWidth + 'px');
 }
 
 function onSidebarSearch(val) {
