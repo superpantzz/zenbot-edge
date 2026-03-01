@@ -663,6 +663,140 @@ function parseSchwabAccountStatement(csvText) {
 }
 
 // ============================================================
+// ZoneBot Stats CSV Parser
+// ============================================================
+
+/**
+ * Extract strategy name from a ZoneBot stats filename.
+ * Filename pattern: zonebot_stats_{STRATEGY}_{SYMBOL}.csv
+ * e.g., "zonebot_stats_STATS-REVERSAL-LONG_Reversal_5M_NQ 03-26.csv"
+ *     → strategy = "STATS-REVERSAL-LONG_Reversal_5M"
+ */
+function extractZoneBotStrategy(fileName, symbol) {
+    let name = fileName.replace(/\.csv$/i, '');
+    name = name.replace(/^zonebot_stats_/i, '');
+    if (symbol) {
+        const idx = name.lastIndexOf(symbol);
+        if (idx > 0) {
+            name = name.substring(0, idx).replace(/_+$/, '');
+        }
+    }
+    return name || 'ZoneBot';
+}
+
+/**
+ * Parse a ZoneBot stats CSV export into an array of trade objects.
+ * Each row is a completed trade signal with outcome — no position matching needed.
+ */
+function parseZoneBotCSV(csvText, fileName) {
+    const lines = csvText.split(/\r?\n/);
+    if (lines.length < 2) return [];
+
+    // Parse header and build column index lookup
+    const headers = parseCSVLine(lines[0]).map(h => h.trim());
+    const col = (name) => headers.indexOf(name);
+
+    const iDateTime = col('DateTime');
+    const iSymbol = col('Symbol');
+    const iDirection = col('Direction');
+    const iEntryType = col('EntryType');
+    const iProfit = col('Profit');
+    const iProfitPoints = col('ProfitPoints');
+    const iMFE = col('MFE');
+    const iMAE = col('MAE');
+
+    if (iDateTime === -1 || iSymbol === -1 || iDirection === -1) return [];
+
+    // Read symbol from first data row to help extract strategy from filename
+    let firstSymbol = '';
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const row = parseCSVLine(line);
+        firstSymbol = (row[iSymbol] || '').trim();
+        if (firstSymbol) break;
+    }
+
+    const strategy = extractZoneBotStrategy(fileName || '', firstSymbol);
+
+    const trades = [];
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const row = parseCSVLine(line);
+
+        const dateTimeStr = (row[iDateTime] || '').trim();
+        if (!dateTimeStr) continue;
+        const symbol = (row[iSymbol] || '').trim();
+        if (!symbol) continue;
+        const direction = (row[iDirection] || '').trim();
+        if (direction !== 'Long' && direction !== 'Short') continue;
+
+        // "2025-12-16 18:10:00" — same format as NinjaTrader 24-hour
+        const entryTime = parseNTDateTime(dateTimeStr);
+        if (!entryTime || isNaN(entryTime.getTime())) continue;
+
+        const profit = parseFloat((row[iProfit] || '0').trim()) || 0;
+
+        // Instrument: "NQ 03-26" → root "NQ"
+        const instrument = symbol.split(' ')[0].trim();
+        const pointValue = FUTURES_POINT_VALUES['/' + instrument] || 20;
+
+        // MFE/MAE are in points — convert to dollar values for consistency
+        const mfePoints = parseFloat((row[iMFE] || '0').trim()) || 0;
+        const maePoints = parseFloat((row[iMAE] || '0').trim()) || 0;
+        const mfe = Math.round(mfePoints * pointValue * 100) / 100;
+        const mae = Math.round(maePoints * pointValue * 100) / 100;
+
+        let exitName;
+        if (profit > 0) exitName = 'Win';
+        else if (profit < 0) exitName = 'Loss';
+        else exitName = 'BE';
+
+        const entryType = iEntryType !== -1 ? (row[iEntryType] || '').trim() : '';
+
+        // JS weekday: 0=Sun..6=Sat → Python convention: 0=Mon..6=Sun
+        const jsDay = entryTime.getDay();
+        const pyDay = jsDay === 0 ? 6 : jsDay - 1;
+
+        trades.push({
+            id: trades.length + 1,
+            instrument: instrument,
+            instrumentFull: symbol,
+            strategy: strategy,
+            subStrategy: strategy,
+            direction: direction,
+            qty: 1,
+            entryPrice: 0,
+            exitPrice: 0,
+            entryTime: formatISOLocal(entryTime),
+            exitTime: formatISOLocal(entryTime), // No exit time in ZoneBot logs
+            entryName: entryType,
+            exitName: exitName,
+            profit: Math.round(profit * 100) / 100,
+            commission: 0,
+            mae: mae,
+            mfe: mfe,
+            etd: 0,
+            bars: 0,
+            holdingMinutes: 0,
+            entryHour: entryTime.getHours(),
+            entryHalfHour: String(entryTime.getHours()).padStart(2, '0') + ':' + (entryTime.getMinutes() < 30 ? '00' : '30'),
+            entryDayOfWeek: pyDay,
+            entryDate: formatDateOnly(entryTime),
+        });
+    }
+
+    // Sort by entryTime
+    trades.sort((a, b) => a.entryTime.localeCompare(b.entryTime));
+    for (let i = 0; i < trades.length; i++) {
+        trades[i].id = i + 1;
+    }
+
+    return trades;
+}
+
+// ============================================================
 // Build TRADE_DATA structure from parsed trades
 // ============================================================
 
@@ -764,21 +898,24 @@ function handleImport(file) {
             const text = e.target.result;
             if (statusEl) statusEl.textContent = 'Parsing trades...';
 
-            // Auto-detect format: thinkorswim (two variants) vs NinjaTrader
+            // Auto-detect format by content sniffing
             // Check Futures Statements first — Account Statement files contain both
             // sections, and the Futures Statements parser handles that format correctly.
             let trades;
+            const firstLine = text.split(/\r?\n/)[0] || '';
             if (text.indexOf('Futures Statements') !== -1) {
                 trades = parseSchwabAccountStatement(text);
             } else if (text.indexOf('Account Trade History') !== -1) {
                 trades = parseSchwabCSV(text);
+            } else if (firstLine.indexOf('DateTime') !== -1 && firstLine.indexOf('EntryType') !== -1 && firstLine.indexOf('IsWin') !== -1) {
+                trades = parseZoneBotCSV(text, file.name);
             } else {
                 trades = parseNinjaTraderCSV(text);
             }
 
             if (trades.length === 0) {
                 if (statusEl) {
-                    statusEl.textContent = 'No valid trades found. Make sure this is a NinjaTrader or thinkorswim trade export CSV.';
+                    statusEl.textContent = 'No valid trades found. Make sure this is a NinjaTrader, thinkorswim, or ZoneBot trade export CSV.';
                     statusEl.className = 'import-status error';
                 }
                 return;
