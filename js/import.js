@@ -873,6 +873,29 @@ function buildTradeData(trades) {
 }
 
 // ============================================================
+// Trade merging (append imports to existing database)
+// ============================================================
+
+function tradeDedupeKey(t) {
+    return `${t.strategy}|${t.direction}|${t.entryTime}|${t.exitTime}`;
+}
+
+function mergeTradesUnique(existing, incoming) {
+    const seen = new Set(existing.map(tradeDedupeKey));
+    const merged = [...existing];
+    for (const t of incoming) {
+        const key = tradeDedupeKey(t);
+        if (!seen.has(key)) {
+            seen.add(key);
+            merged.push(t);
+        }
+    }
+    merged.sort((a, b) => a.entryTime.localeCompare(b.entryTime));
+    for (let i = 0; i < merged.length; i++) merged[i].id = i + 1;
+    return merged;
+}
+
+// ============================================================
 // Import handler
 // ============================================================
 
@@ -921,9 +944,20 @@ function handleImport(file) {
                 return;
             }
 
-            if (statusEl) statusEl.textContent = `Found ${trades.length} trades. Building dashboard...`;
+            // Merge with existing trades if any are already loaded
+            const existingTrades = (window.TRADE_DATA && window.TRADE_DATA.trades) ? window.TRADE_DATA.trades : [];
+            const merged = existingTrades.length > 0
+                ? mergeTradesUnique(existingTrades, trades)
+                : trades;
 
-            const data = buildTradeData(trades);
+            const newCount = merged.length - existingTrades.length;
+            if (existingTrades.length > 0) {
+                if (statusEl) statusEl.textContent = `Added ${newCount} new trades (${merged.length} total). Building dashboard...`;
+            } else {
+                if (statusEl) statusEl.textContent = `Found ${trades.length} trades. Building dashboard...`;
+            }
+
+            const data = buildTradeData(merged);
             if (!data) {
                 if (statusEl) {
                     statusEl.textContent = 'Failed to build trade data.';
