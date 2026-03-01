@@ -251,11 +251,11 @@
         <p class="import-desc">Drop a NinjaTrader or thinkorswim trade export CSV to analyze your trades. No data leaves your browser.</p>
         <div class="import-dropzone" id="import-dropzone">
             <div class="dropzone-icon">&#128206;</div>
-            <div class="dropzone-text">Drag & drop CSV file here</div>
+            <div class="dropzone-text">Drag & drop CSV files here</div>
             <div class="dropzone-or">or</div>
             <label class="dropzone-browse-btn">
                 Browse Files
-                <input type="file" accept=".csv" id="import-file-input" style="display:none" onchange="handleImport(this.files[0])">
+                <input type="file" accept=".csv" multiple id="import-file-input" style="display:none" onchange="handleImport(this.files)">
             </label>
         </div>
         <div class="import-status" id="import-status"></div>
